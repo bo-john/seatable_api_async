@@ -1,0 +1,11 @@
+[project]
+name = "seatable_api_async"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.13.2",
+    "ply>=3.11",
+    "python-dateutil>=2.9.0.post0",
+    "requests>=2.32.5",
+]
