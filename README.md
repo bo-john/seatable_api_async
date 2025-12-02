@@ -1,7 +1,7 @@
 # seatable_api_async
 
 #### 介绍
-将 seatable-api  核心功能由同步改成异步
+基于seatable-api改造, 将核心功能由同步改成异步,并开源.
 
 #### 参与贡献
 

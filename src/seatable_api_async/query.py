@@ -3,7 +3,7 @@ import copy
 # https://ply.readthedocs.io
 from ply import lex, yacc
 
-from seatable_api_async.column import get_column_by_type
+from .column import get_column_by_type
 
 
 class Lexer(object):

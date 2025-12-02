@@ -6,7 +6,7 @@ from uuid import UUID
 
 import aiohttp
 
-from seatable_api_async.constants import (
+from .constants import (
     ROW_FILTER_KEYS,
     ColumnTypes,
     RENAME_COLUMN,
@@ -14,17 +14,17 @@ from seatable_api_async.constants import (
     FREEZE_COLUMN,
     MOVE_COLUMN,
     MODIFY_COLUMN_TYPE)
-from seatable_api_async.exception import BaseUnauthError
-from seatable_api_async.exception import SeatableApiException
-from seatable_api_async.query import QuerySet
-from seatable_api_async.utils import parse_server_url, parse_headers, like_table_id, convert_db_rows
+from .exception import BaseUnauthError
+from .exception import SeatableApiException
+from .query import QuerySet
+from .utils import parse_server_url, parse_headers, like_table_id, convert_db_rows
 
 
 class SeaTableApiAsync(object):
 
     def __init__(self, token, server_url, proxy=None):
         self.token = token
-        self.server_url = server_url
+        self.server_url = server_url.strip().strip('/')
         self.dtable_server_url = None
         self.dtable_db_url = None
         self.jwt_token = None

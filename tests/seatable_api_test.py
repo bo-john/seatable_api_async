@@ -1,14 +1,22 @@
 import asyncio
+import os
+
+from dotenv import load_dotenv
 
 from seatable_api_async.seatable_api import SeaTableApiAsync
 
 
 async def main():
-    token = "xxx"
+    # 读取环境变量文件 .env
+    # 没有则从.env_template拷贝生成一个 .env文件
+    load_dotenv()
+
+    # 某个表格的token
+    token = os.getenv('TOKEN')
     # seatable服务地址
-    server_url = 'http://127.0.0.1:30080/'
+    server_url = os.getenv('SERVER_URL')
     # 代理ip
-    proxy = "http://127.0.0.1:9090"
+    proxy = os.getenv('PROXY')
 
     async with SeaTableApiAsync(
             token=token,
@@ -17,8 +25,8 @@ async def main():
     ) as api:
         table_name = "老师表"
 
-        # metadata = await api.get_metadata()
-        # print(metadata)
+        metadata = await api.get_metadata()
+        print(metadata)
         """
             table相关操作测试
         """

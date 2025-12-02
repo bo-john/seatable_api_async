@@ -3,7 +3,7 @@ from json import JSONDecodeError, loads as json_loads
 
 import aiohttp
 
-from seatable_api_async.exception import AccountApiAsyncException
+from .exception import AccountApiAsyncException
 
 
 class AccountApiAsync(object):

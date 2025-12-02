@@ -1,15 +1,22 @@
 import asyncio
+import os
+
+from dotenv import load_dotenv
 
 from seatable_api_async.account_api import AccountApiAsync
 
 
 async def main():
+    # 读取环境变量文件 .env
+    # 没有则从.env_template拷贝生成一个 .env文件
+    load_dotenv()
+
     # 用户名
-    login_name = 'xxx'
+    login_name = os.getenv('LOGIN_NAME')
     # 密码
-    password = ''
+    password = os.getenv('PASSWORD')
     # seatable服务地址
-    server_url = 'http://127.0.0.1:30080/'
+    server_url = os.getenv('SERVER_URL')
 
     async with AccountApiAsync(
             login_name=login_name,

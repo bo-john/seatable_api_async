@@ -1,11 +1,24 @@
+[build-system]
+requires = ["uv_build >= 0.9.10, <0.10.0"]
+build-backend = "uv_build"
+
 [project]
 name = "seatable_api_async"
 version = "0.1.0"
-description = "Add your description here"
+description = "异步版本的 SeaTable API 客户端,基于seatable-api改造, 将核心功能由同步改成异步,并开源"
+authors = [
+    { name = "bo-john", email = "boxiong74@gmail.com" }
+]
+readme = "README.md"
+license = { text = "Apache Licence" }
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.13.2",
+    "dotenv>=0.9.9",
     "ply>=3.11",
     "python-dateutil>=2.9.0.post0",
     "requests>=2.32.5",
 ]
+
+Repository = "https://github.com/bo-john/seatable_api_async.git"
+Issues = "https://github.com/bo-john/seatable_api_async/issues"
