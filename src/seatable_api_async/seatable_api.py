@@ -1,9 +1,13 @@
-import typing
+"""SeaTable Base API 异步客户端"""
+from __future__ import annotations
+
 from datetime import datetime, timedelta
 from json import JSONDecodeError, loads as json_loads
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib import parse
 from uuid import UUID
 
+import aiofiles
 import aiohttp
 
 from .constants import (
@@ -13,879 +17,633 @@ from .constants import (
     RESIZE_COLUMN,
     FREEZE_COLUMN,
     MOVE_COLUMN,
-    MODIFY_COLUMN_TYPE)
-from .exception import BaseUnauthError
-from .exception import SeatableApiException
-from .query import QuerySet
-from .utils import parse_server_url, parse_headers, like_table_id, convert_db_rows
+    MODIFY_COLUMN_TYPE,
+)
+from .exception import BaseUnauthError, SeatableApiException
+from .utils import parse_server_url, parse_headers, like_table_id, convert_db_rows, path_get
+
+__all__ = ["SeaTableApiAsync"]
 
 
-class SeaTableApiAsync(object):
+class SeaTableApiAsync:
+    """SeaTable Base API 异步客户端
 
-    def __init__(self, token, server_url, proxy=None):
+    示例:
+        async with SeaTableApiAsync(token, server_url) as api:
+            rows = await api.list_rows("Table1")
+    """
+
+    def __init__(
+            self,
+            token: str,
+            server_url: str,
+            use_api_gateway: bool = False,
+            proxy: Optional[str] = None,
+            timeout: int = 30
+    ) -> None:
         self.token = token
-        self.server_url = server_url.strip().strip('/')
-        self.dtable_server_url = None
-        self.dtable_db_url = None
-        self.jwt_token = None
-        self.jwt_exp = None
-        self.headers = None
-        self.workspace_id = None
-        self.dtable_uuid = None
-        self.dtable_name = None
-        self.timeout = 30
-        self.socketIO = None
-        self.is_authed = False
-
-        self.use_api_gateway = False
-        self.api_gateway = None
+        self.server_url = server_url.strip().rstrip("/")
+        self.use_api_gateway = use_api_gateway
         self.proxy = proxy
-        self.session = aiohttp.ClientSession(proxy=proxy)
+        self.timeout = timeout
 
-    def __str__(self):
-        return f'<SeaTable Base [ {self.dtable_name} ]>'
+        # 认证后填充
+        self.dtable_server_url: Optional[str] = None
+        self.dtable_db_url: Optional[str] = None
+        self.jwt_token: Optional[str] = None
+        self.jwt_exp: Optional[datetime] = None
+        self.headers: Optional[Dict[str, str]] = None
+        self.workspace_id: Optional[int] = None
+        self.dtable_uuid: Optional[str] = None
+        self.dtable_name: Optional[str] = None
+        self.is_authed = False
+        self.session: Optional[aiohttp.ClientSession] = None
 
-    async def __aenter__(self):
-        await self.session.__aenter__()
+    def __str__(self) -> str:
+        return f"<SeaTable Base [{self.dtable_name}]>"
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    async def __aenter__(self) -> SeaTableApiAsync:
+        self.session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=100, limit_per_host=30),
+            timeout=aiohttp.ClientTimeout(total=self.timeout),
+        )
         await self.auth()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.session.__aexit__(exc_type, exc_val, exc_tb)
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        if self.session:
+            await self.session.close()
 
-    def _table_server_url(self):
-        return f"dtable-server/api/v1/dtables/{self.dtable_uuid}/tables/"
+    def _table_params(self, table_name: str, **extra: Any) -> Dict[str, Any]:
+        """构建表参数，自动处理 table_id"""
+        params = {"table_name": table_name, **extra}
+        if like_table_id(table_name):
+            params["table_id"] = table_name
+        return params
 
-    def _view_server_url(self):
-        return f"dtable-server/api/v1/dtables/{self.dtable_uuid}/views/"
+    def _link_params(self, table_name: str, other_table_name: str, **extra: Any) -> Dict[str, Any]:
+        """构建链接参数"""
+        params = {"table_name": table_name, "other_table_name": other_table_name, **extra}
+        if like_table_id(table_name):
+            params["table_id"] = table_name
+        if like_table_id(other_table_name):
+            params["other_table_id"] = other_table_name
+        return params
 
-    def _row_server_url(self):
-        return f"dtable-server/api/v1/dtables/{self.dtable_uuid}/rows/"
-
-    def _row_link_server_url(self):
-        return f"dtable-server/api/v1/dtables/{self.dtable_uuid}/links/"
-
-    def _column_server_url(self):
-        return f"dtable-server/api/v1/dtables/{self.dtable_uuid}/columns/"
-
-    async def get(self, action, json=None, params=None, headers=None,
-                  proxy=None, token_type=None, response_type=None,
-                  is_check_auth: bool = True):
-        return await self.req(
-            method="GET",
-            action=action,
-            json=json,
-            params=params,
-            headers=headers,
-            proxy=proxy,
-            token_type=token_type,
-            response_type=response_type,
-            is_check_auth=is_check_auth
-        )
-
-    async def post(
-            self, action, json=None, data=None, params=None, headers=None, proxy=None, token_type=None,
-            response_type=None, file=None, is_check_auth: bool = True):
-        return await self.req(
-            method="POST",
-            action=action,
-            json=json,
-            data=data,
-            file=file,
-            params=params,
-            headers=headers,
-            proxy=proxy,
-            token_type=token_type,
-            response_type=response_type,
-            is_check_auth=is_check_auth
-        )
-
-    async def put(self, action, json=None, data=None, params=None, headers=None, proxy=None, token_type=None,
-                  response_type=None, is_check_auth: bool = True):
-        return await self.req(
-            method="PUT",
-            action=action,
-            json=json,
-            data=data,
-            params=params,
-            headers=headers,
-            proxy=proxy,
-            token_type=token_type,
-            response_type=response_type,
-            is_check_auth=is_check_auth
-        )
-
-    async def delete(self, action, json=None, data=None, params=None, headers=None, proxy=None,
-                     token_type=None, is_check_auth: bool = True):
-        return await self.req(
-            method="DELETE",
-            action=action,
-            json=json,
-            data=data,
-            params=params,
-            headers=headers,
-            proxy=proxy,
-            token_type=token_type,
-            is_check_auth=is_check_auth
-        )
+    # ========== HTTP 请求 ==========
 
     async def req(
             self,
-            method: typing.Literal["GET", "POST", "PUT", "DELETE"],
-            action,
-            json=None,
-            data=None,
-            file: typing.Tuple[str, bytes] = None,
-            params=None,
-            headers=None,
-            proxy=None,
-            token_type: typing.Literal["JWT", "TOKEN", "None"] = None,
-            response_type: typing.Literal["json", "text", "bytes"] = None,
+            method: Literal["GET", "POST", "PUT", "DELETE"],
+            url: str,
+            json: Optional[Dict[str, Any]] = None,
+            data: Optional[Dict[str, Any]] = None,
+            file: Optional[Tuple[str, bytes]] = None,
+            params: Optional[Dict[str, Any]] = None,
+            headers: Optional[Dict[str, str]] = None,
+            proxy: Optional[str] = None,
+            token_type: Optional[Literal["JWT", "TOKEN", "None"]] = None,
+            response_type: Optional[Literal["json", "text", "bytes"]] = None,
+            res_path: Optional[str] = None,
             is_check_auth: bool = True,
-    ) -> typing.Union[str, typing.Dict, bytes]:
-
+    ) -> Any:
+        """发送 HTTP 请求"""
         if is_check_auth and not self.is_authed:
             raise BaseUnauthError
 
-        split_index = action.find("/")
-        dtable_type = action[:split_index]
-        dtable_path = action[split_index + 1:]
-        if dtable_type == "dtable-server":
-            url = self.dtable_server_url
-            action = dtable_path
-        elif dtable_type == "dtable-db":
-            url = self.dtable_db_url
-            action = dtable_path
-        else:
-            url = self.server_url
-
+        # 确定 token 类型
         token_type = token_type or "JWT"
-        base_headers = {}
-        if self.jwt_token != "None":
-            base_headers.update({
-                "Authorization": f"Token {self.jwt_token if token_type == 'JWT' else self.token}",
-            })
-        headers = headers or {}
-        base_headers.update(headers)
 
-        data = {k: v for k, v in data.items() if v is not None} if data else None
+        # 检查 JWT token 是否即将过期，如果是则自动续期
+        # 提前 5 分钟刷新，避免在请求过程中过期
+        if is_check_auth and token_type == "JWT" and self.jwt_exp:
+            buffer_time = timedelta(minutes=5)
+            now = datetime.now()
+            threshold = now + buffer_time
+            if threshold >= self.jwt_exp:
+                # Token 即将过期或已过期，自动刷新
+                await self.auth()
+
+        # URL 末尾加斜杠
+        if not url.endswith("/"):
+            url = url + "/"
+
+        # 构建请求头
+        req_headers: Dict[str, str] = {}
+        if token_type != "None":
+            token = self.jwt_token if token_type == "JWT" else self.token
+            req_headers["Authorization"] = f"Token {token}"
+        if headers:
+            req_headers.update(headers)
+
+        # 清理 None 值
+        if json:
+            json = {k: v for k, v in json.items() if v is not None}
+        if data:
+            data = {k: v for k, v in data.items() if v is not None}
+        if params:
+            params = {k: str(v) for k, v in params.items() if v is not None}
+
+        # 处理文件上传
+        req_data: Any = data
         if file is not None:
             form_data = aiohttp.FormData()
-            form_data.add_field(
-                name="file",
-                value=file[1],
-                filename=file[0],
-            )
-            for k, v in data.items():
-                form_data.add_field(
-                    name=k,
-                    value=str(v),
-                )
-            data = form_data
+            form_data.add_field(name="file", value=file[1], filename=file[0])
+            if data:
+                for k, v in data.items():
+                    form_data.add_field(name=k, value=str(v))
+            req_data = form_data
 
         resp = await self.session.request(
             method=method,
-            url=f"{url}/{action}",
-            headers=base_headers,
-            json={k: v for k, v in json.items() if v is not None} if json else None,
-            data=data,
-            params={k: str(v) for k, v in params.items() if v is not None} if params else None,
-            proxy=proxy,
-            ssl=False,
+            url=url,
+            headers=req_headers,
+            json=json,
+            data=req_data,
+            params=params,
+            proxy=proxy or self.proxy,
         )
-        res_status = resp.status
-        res_text = await resp.text()
 
-        if res_status == 429:
+        status = resp.status
+        text = await resp.text()
+
+        if status == 429:
             raise SeatableApiException("429 Too Many Requests")
-
-        if res_status == 404:
-            raise SeatableApiException("请求404")
-
-        if res_status in [400, 403]:
-            raise SeatableApiException(res_text)
+        if status == 404:
+            raise SeatableApiException(f"404 Not Found: {url}")
+        if status in (400, 403):
+            raise SeatableApiException(text)
+        if status >= 400:
+            raise SeatableApiException(f"HTTP {status}: {text[:200]}")
 
         response_type = response_type or "json"
-
         if response_type == "bytes":
             return await resp.read()
-
         if response_type == "text":
-            return res_text
+            return text
 
         try:
-            res = json_loads(res_text)
+            res = json_loads(text)
+            return path_get(res, res_path) if res_path else res
         except JSONDecodeError as e:
-            raise SeatableApiException("response not json", e)
+            raise SeatableApiException(f"Invalid JSON response: {e}")
 
-        return res
+    async def get(self, url: str, **kwargs: Any) -> Any:
+        return await self.req("GET", url, **kwargs)
 
-    async def auth(self):
-        """Auth to SeaTable
-        """
+    async def post(self, url: str, **kwargs: Any) -> Any:
+        return await self.req("POST", url, **kwargs)
+
+    async def put(self, url: str, **kwargs: Any) -> Any:
+        return await self.req("PUT", url, **kwargs)
+
+    async def delete(self, url: str, **kwargs: Any) -> Any:
+        return await self.req("DELETE", url, **kwargs)
+
+    # ========== 认证 ==========
+
+    async def auth(self) -> None:
+        """认证并获取访问令牌"""
         self.jwt_exp = datetime.now() + timedelta(days=3)
-        action = "api/v2.1/dtable/app-access-token/"
-        data = await self.get(action=action, token_type="TOKEN", is_check_auth=False)
+        data = await self.get(f"{self.dtable_2_1}/app-access-token", token_type="TOKEN", is_check_auth=False)
 
         self.dtable_server_url = parse_server_url(data.get("dtable_server"))
         self.dtable_db_url = parse_server_url(data.get("dtable_db", ""))
-
         self.jwt_token = data.get("access_token")
         self.headers = parse_headers(self.jwt_token)
         self.workspace_id = data.get("workspace_id")
         self.dtable_uuid = data.get("dtable_uuid")
         self.dtable_name = data.get("dtable_name")
-
         self.use_api_gateway = data.get("use_api_gateway")
-
         self.is_authed = True
 
-    async def get_metadata(self):
-        action = f"dtable-server/api/v1/dtables/{self.dtable_uuid}/metadata/"
-        data = await self.get(action=action)
-        return data.get("metadata")
+    # ========== 元数据 ==========
 
-    async def list_tables(self):
+    async def get_metadata(self) -> Dict[str, Any]:
+        return await self.get(f"{self.dtable}/metadata", res_path="metadata")
+
+    async def list_tables(self) -> List[Dict[str, Any]]:
         meta = await self.get_metadata()
         return meta.get("tables") or []
 
-    async def get_table_by_name(self, table_name):
+    async def get_table_by_name(self, table_name: str) -> Optional[Dict[str, Any]]:
         tables = await self.list_tables()
-        for t in tables:
-            if t.get("name") == table_name:
-                return t
-        return None
+        return next((t for t in tables if t.get("name") == table_name), None)
 
-    async def add_table(self, table_name, lang="en", columns=None):
-        return await self.post(
-            action=self._table_server_url(),
-            json={
-                "table_name": table_name,
-                "lang": lang,
-                "columns": columns,
-            })
+    # ==== property =====
+    @property
+    def dtable(self):
+        url = f"{self.server_url}/api-gateway/api/v2" if self.use_api_gateway else f"{self.dtable_server_url}/api/v1"
+        return f"{url}/dtables/{self.dtable_uuid}"
 
-    async def rename_table(self, table_name, new_table_name):
-        return await self.put(
-            action=self._table_server_url(),
-            json={
-                "table_name": table_name,
-                "new_table_name": new_table_name
-            })
+    @property
+    def dtable_db(self):
+        return f"{self.dtable_db_url}/api/v1"
 
-    async def delete_table(self, table_name):
-        return await self.delete(
-            action=self._table_server_url(),
-            json={
-                "table_name": table_name,
-            }
-        )
+    @property
+    def dtable_tables(self):
+        return f"{self.dtable}/tables"
 
-    async def list_views(self, table_name):
-        return await self.get(
-            action=self._view_server_url(),
-            params={"table_name": table_name}
-        )
+    @property
+    def dtable_views(self):
+        return f"{self.dtable}/views"
 
-    async def get_view_by_name(self, table_name, view_name):
-        return await self.get(
-            action=f"{self._view_server_url().rstrip('/')}/{view_name}/",
-            params={"table_name": table_name}
-        )
+    @property
+    def dtable_rows(self):
+        return f"{self.dtable}/rows"
 
-    async def add_view(self, table_name, view_name):
-        return await self.post(
-            action=f"{self._view_server_url().rstrip('/')}/",
-            json={"name": view_name},
-            params={"table_name": table_name},
-        )
+    @property
+    def dtable_links(self):
+        return f"{self.dtable}/links"
 
-    async def rename_view(self, table_name, view_name, new_view_name):
-        return await self.put(
-            action=f"{self._view_server_url().rstrip('/')}/{view_name}/",
-            json={"name": new_view_name},
-            params={"table_name": table_name}
-        )
+    @property
+    def dtable_columns(self):
+        return f"{self.dtable}/columns"
 
-    async def delete_view(self, table_name, view_name):
-        return await self.delete(
-            action=f"{self._view_server_url().rstrip('/')}/{view_name}/",
-            params={"table_name": table_name}
-        )
+    @property
+    def dtable_2_1(self):
+        return f"{self.server_url}/api/v2.1/dtable"
 
-    async def list_rows(self, table_name, view_name=None, order_by=None, desc=False, start=None, limit=None):
-        params = {
-            "table_name": table_name,
-            "view_name": view_name,
-            "start": start,
-            "limit": limit,
-        }
+    @property
+    def dtable_custom(self):
+        return f"{self.dtable_2_1}/custom"
 
-        if like_table_id(table_name):
-            params["table_id"] = table_name
+    # ========== 表操作 ==========
+
+    async def add_table(self, table_name: str, lang: str = "en", columns: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        return await self.post(self.dtable_tables, json={"table_name": table_name, "lang": lang, "columns": columns})
+
+    async def rename_table(self, table_name: str, new_table_name: str) -> Dict[str, Any]:
+        return await self.put(self.dtable_tables, json={"table_name": table_name, "new_table_name": new_table_name})
+
+    async def delete_table(self, table_name: str) -> Dict[str, Any]:
+        json_data = {"table_name": table_name}
+        return await self.delete(self.dtable_tables, json=json_data)
+
+    # ========== 视图操作 ==========
+
+    async def list_views(self, table_name: str) -> Dict[str, Any]:
+        return await self.get(self.dtable_views, params={"table_name": table_name})
+
+    async def get_view_by_name(self, table_name: str, view_name: str) -> Dict[str, Any]:
+        return await self.get(f"{self.dtable_views}/{view_name}", params={"table_name": table_name})
+
+    async def add_view(self, table_name: str, view_name: str) -> Dict[str, Any]:
+        return await self.post(self.dtable_views, json={"name": view_name}, params={"table_name": table_name})
+
+    async def rename_view(self, table_name: str, view_name: str, new_view_name: str) -> Dict[str, Any]:
+        return await self.put(f"{self.dtable_views}/{view_name}", json={"name": new_view_name}, params={"table_name": table_name})
+
+    async def delete_view(self, table_name: str, view_name: str) -> Dict[str, Any]:
+        return await self.delete(f"{self.dtable_views}/{view_name}", params={"table_name": table_name})
+
+    # ========== 行操作 ==========
+
+    async def list_rows(
+            self,
+            table_name: str,
+            view_name: Optional[str] = None,
+            order_by: Optional[str] = None,
+            desc: bool = False,
+            start: Optional[int] = None,
+            limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        params = self._table_params(table_name, view_name=view_name, start=start, limit=limit)
         if order_by:
-            params.update({
-                "order_by": order_by,
-                "direction": "desc" if desc else "asc"
-            })
-        res = await self.get(
-            action=self._row_server_url(),
-            params=params)
-        return res.get("rows")
+            params["order_by"] = order_by
+            params["direction"] = "desc" if desc else "asc"
+        if self.use_api_gateway:
+            params["convert_keys"] = True
+        return await self.get(self.dtable_rows, params=params, res_path="rows")
 
-    async def get_row(self, table_name, row_id):
-        return await self.get(
-            action=f"{self._row_server_url().rstrip('/')}/{row_id}",
-            params={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name
-            })
+    async def get_row(self, table_name: str, row_id: str) -> Dict[str, Any]:
+        params = self._table_params(table_name)
+        if self.use_api_gateway:
+            params["convert_keys"] = True
+        return await self.get(f"{self.dtable_rows}/{row_id}", params=params)
 
-    async def append_row(self, table_name, row_data, apply_default=None):
-        return await self.post(action=self._row_server_url(), json={
-            "table_id": table_name if like_table_id(table_name) else None,
-            "table_name": table_name,
-            "row": row_data,
-            "apply_default": apply_default
-        })
+    async def append_row(self, table_name: str, row_data: Dict[str, Any], apply_default: Optional[bool] = None) -> Dict[str, Any]:
+        json_data: Dict[str, Any] = {**self._table_params(table_name)}
+        if apply_default is not None:
+            json_data["apply_default"] = apply_default
+        if self.use_api_gateway:
+            json_data["rows"] = [row_data]
+            return await self.post(self.dtable_rows, json=json_data, res_path="first_row")
+        else:
+            json_data["row"] = row_data
+            return await self.post(self.dtable_rows, json=json_data)
 
-    async def batch_append_rows(self, table_name, rows_data, apply_default=None):
-        return await self.post(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/batch-append-rows/",
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "rows": rows_data,
-                "apply_default": apply_default
-            })
+    async def batch_append_rows(self, table_name: str, rows_data: List[Dict[str, Any]], apply_default: Optional[bool] = None) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "rows": rows_data}
+        if apply_default is not None:
+            json_data["apply_default"] = apply_default
+        if self.use_api_gateway:
+            return await self.post(self.dtable_rows, json=json_data)
+        else:
+            return await self.post(f"{self.dtable}/batch-append-rows", json=json_data)
 
-    async def insert_row(self, table_name, row_data, anchor_row_id, apply_default=None):
-        return await self.post(
-            action=self._row_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "row": row_data,
-                "anchor_row_id": anchor_row_id,
-                "apply_default": apply_default
-            })
+    async def insert_row(self, table_name: str, row_data: Dict[str, Any], anchor_row_id: str, apply_default: Optional[bool] = None) -> Dict[str, Any]:
+        """插入行到指定行之后（v2 API 不支持 anchor_row_id，等同于 append_row）"""
+        if self.use_api_gateway:
+            return await self.append_row(table_name, row_data, apply_default)
+        else:
+            return await self.post(self.dtable_rows, json={**self._table_params(table_name), "row": row_data, "anchor_row_id": anchor_row_id, "apply_default": apply_default})
 
-    async def update_row(self, table_name, row_id, row_data):
-        return await self.put(
-            action=self._row_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "row_id": row_id,
-                "row": row_data,
-            })
+    async def update_row(self, table_name: str, row_id: str, row_data: Dict[str, Any]) -> Dict[str, Any]:
+        json_data: Dict[str, Any] = {**self._table_params(table_name)}
+        if self.use_api_gateway:
+            json_data["updates"] = [{"row_id": row_id, "row": row_data}]
+        else:
+            json_data.update({"row_id": row_id, "row": row_data})
+        return await self.put(self.dtable_rows, json=json_data)
 
-    async def batch_update_rows(self, table_name, rows_data):
-        return await self.put(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/batch-update-rows/",
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "updates": rows_data,
-            })
+    async def batch_update_rows(self, table_name: str, rows_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "updates": rows_data}
+        if self.use_api_gateway:
+            return await self.put(self.dtable_rows, json=json_data)
+        else:
+            return await self.put(f"{self.dtable}/batch-update-rows", json=json_data)
 
-    async def delete_row(self, table_name, row_id):
-        return await self.delete(
-            action=self._row_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "row_id": row_id,
-            })
+    async def delete_row(self, table_name: str, row_id: str) -> Dict[str, Any]:
+        json_data: Dict[str, Any] = {**self._table_params(table_name)}
+        if self.use_api_gateway:
+            json_data["row_ids"] = [row_id]
+        else:
+            json_data["row_id"] = row_id
+        return await self.delete(self.dtable_rows, json=json_data)
 
-    async def batch_delete_rows(self, table_name, row_ids):
-        return await self.delete(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/batch-delete-rows/",
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "row_ids": row_ids,
-            })
+    async def batch_delete_rows(self, table_name: str, row_ids: List[str]) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "row_ids": row_ids}
+        if self.use_api_gateway:
+            return await self.delete(self.dtable_rows, json=json_data)
+        else:
+            return await self.delete(f"{self.dtable}/batch-delete-rows", json=json_data)
 
-    # no test 可用query函数代替,更常用
-    async def filter_rows(self, table_name, filters, view_name=None, filter_conjunction="And"):
-
-        if not filters:
-            raise ValueError("filters can not be empty.")
-        if not isinstance(filters, list):
-            raise ValueError("filters invalid.")
-        if len(filters) != len([f for f in filters if isinstance(f, dict)]):
-            raise ValueError("filters invalid.")
-
+    async def filter_rows(
+            self,
+            table_name: str,
+            filters: List[Dict[str, Any]],
+            view_name: Optional[str] = None,
+            filter_conjunction: Literal["And", "Or"] = "And"
+    ) -> List[Dict[str, Any]]:
+        """根据条件过滤行"""
+        if not filters or not all(isinstance(f, dict) for f in filters):
+            raise ValueError("filters invalid")
         for f in filters:
-            for key in f.keys():
-                if key not in ROW_FILTER_KEYS:
-                    raise ValueError("filters invalid.")
+            if not all(k in ROW_FILTER_KEYS for k in f.keys()):
+                raise ValueError("filters invalid")
+        if filter_conjunction not in ("And", "Or"):
+            raise ValueError("filter_conjunction must be 'And' or 'Or'")
 
-        if filter_conjunction not in ["And", "Or"]:
-            raise ValueError("filter_conjunction invalid, filter_conjunction must be"
-                             "And" or "Or")
+        json_data = {"filters": filters, "filter_conjunction": filter_conjunction}
+        params = {"table_name": table_name, "view_name": view_name}
+        return await self.get(f"{self.dtable_server_url}/api/v1/dtables/{self.dtable_uuid}/filtered-rows", json=json_data, params=params, res_path="rows")
 
-        params = {
-            "table_name": table_name,
-        }
-        json_data = {
-            "filters": filters,
-            "filter_conjunction": filter_conjunction,
-        }
+    # ========== 链接操作 ==========
 
-        action = f"dtable-server/api/v1/dtables/{self.dtable_uuid}/filtered-rows/"
-        res = await self.get(action=action, json=json_data, params=params)
-        return res.get("rows")
+    async def add_link(self, link_id: str, table_name: str, other_table_name: str, row_id: str, other_row_id: str) -> Dict[str, Any]:
+        json_data: Dict[str, Any] = {"link_id": link_id, **self._link_params(table_name, other_table_name)}
+        if self.use_api_gateway:
+            json_data["other_rows_ids_map"] = {row_id: [other_row_id]}
+        else:
+            json_data.update({"table_row_id": row_id, "other_table_row_id": other_row_id})
+        return await self.post(self.dtable_links, json=json_data)
 
-    async def get_file_download_link(self, path):
-        res = await self.get(
-            action="api/v2.1/dtable/app-download-link/",
-            params={"path": path},
-            token_type="TOKEN")
-        return res.get("download_link")
+    async def batch_add_links(self, link_id: str, table_name: str, other_table_name: str, other_rows_ids_map: Dict[str, List[str]]) -> Dict[str, Any]:
+        json_data = {"link_id": link_id, **self._link_params(table_name, other_table_name), "other_rows_ids_map": other_rows_ids_map}
+        return await self.post(self.dtable_links, json=json_data)
 
-    async def get_file_upload_link(self) -> dict:
-        return await self.get(
-            action="api/v2.1/dtable/app-upload-link/",
-            token_type="TOKEN")
+    async def remove_link(self, link_id: str, table_name: str, other_table_name: str, row_id: str, other_row_id: str) -> Dict[str, Any]:
+        json_data: Dict[str, Any] = {"link_id": link_id, **self._link_params(table_name, other_table_name)}
+        if self.use_api_gateway:
+            json_data["other_rows_ids_map"] = {row_id: [other_row_id]}
+        else:
+            json_data.update({"table_row_id": row_id, "other_table_row_id": other_row_id})
+        return await self.delete(self.dtable_links, json=json_data)
 
-    # no test
-    async def add_link(self, link_id, table_name, other_table_name, row_id, other_row_id):
-        return await self.post(
-            action=self._row_link_server_url(),
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "table_row_id": row_id,
-                "other_table_row_id": other_row_id,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
+    async def batch_remove_links(self, link_id: str, table_name: str, other_table_name: str, other_rows_ids_map: Dict[str, List[str]]) -> Dict[str, Any]:
+        json_data = {"link_id": link_id, **self._link_params(table_name, other_table_name), "other_rows_ids_map": other_rows_ids_map}
+        return await self.delete(self.dtable_links, json=json_data)
 
-    # no test
-    async def batch_add_links(self, link_id, table_name, other_table_name, other_rows_ids_map):
-        return await self.post(
-            action=self._row_link_server_url(),
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "other_rows_ids_map": other_rows_ids_map,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
-
-    # no test
-    async def remove_link(self, link_id, table_name, other_table_name, row_id, other_row_id):
-        return await self.delete(
-            action=self._row_link_server_url(),
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "table_row_id": row_id,
-                "other_table_row_id": other_row_id,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
-
-    # no test
-    async def batch_remove_links(self, link_id, table_name, other_table_name, other_rows_ids_map):
-        return await self.delete(
-            action=self._row_link_server_url(),
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "other_rows_ids_map": other_rows_ids_map,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
-
-    # no test
-    async def update_link(self, link_id, table_name, other_table_name, row_id, other_rows_ids):
+    async def update_link(self, link_id: str, table_name: str, other_table_name: str, row_id: str, other_rows_ids: List[str]) -> Dict[str, Any]:
         if not isinstance(other_rows_ids, list):
-            raise ValueError("params other_rows_ids requires type list")
+            raise ValueError("other_rows_ids must be a list")
+        json_data: Dict[str, Any] = {"link_id": link_id, **self._link_params(table_name, other_table_name)}
+        if self.use_api_gateway:
+            json_data.update({"row_id_list": [row_id], "other_rows_ids_map": {row_id: other_rows_ids}})
+        else:
+            json_data.update({"row_id": row_id, "other_rows_ids": other_rows_ids})
+        return await self.put(self.dtable_links, json=json_data)
 
-        return await self.put(
-            action=self._row_link_server_url(),
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "row_id": row_id,
-                "other_rows_ids": other_rows_ids,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
+    async def batch_update_links(self, link_id: str, table_name: str, other_table_name: str, row_id_list: List[str], other_rows_ids_map: Dict[str, List[str]]) -> Dict[str, Any]:
+        json_data = {"link_id": link_id, **self._link_params(table_name, other_table_name), "row_id_list": row_id_list, "other_rows_ids_map": other_rows_ids_map}
+        if self.use_api_gateway:
+            return await self.put(self.dtable_links, json=json_data)
+        else:
+            return await self.put(f"{self.dtable}/batch-update-links", json=json_data)
 
-    # no test
-    async def batch_update_links(self, link_id, table_name, other_table_name, row_id_list, other_rows_ids_map):
-        return await self.put(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/batch-update-links/",
-            json={
-                "link_id": link_id,
-                "table_name": table_name,
-                "other_table_name": other_table_name,
-                "row_id_list": row_id_list,
-                "other_rows_ids_map": other_rows_ids_map,
-                "table_id": table_name if like_table_id(table_name) else None,
-                "other_table_id": other_table_name if like_table_id(other_table_name) else None,
-            })
+    async def get_linked_records(self, table_id: str, link_column_key: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if self.use_api_gateway:
+            json_data = {"table_id": table_id, "link_column_key": link_column_key, "rows": rows}
+            return await self.post(f"{self.dtable}/query-links", json=json_data)
+        else:
+            return await self.post(f"{self.dtable_db}/linked-records/{self.dtable_uuid}", json={"table_id": table_id, "link_column": link_column_key, "rows": rows})
 
-    # no test
-    async def get_linked_records(self, table_id, link_column_key, rows):
-        return await self.get(
-            action=f"dtable-server/api/v1/linked-records/{self.dtable_uuid}/",
-            json={
-                "table_id": table_id,
-                "link_column": link_column_key,
-                "rows": rows,
-            })
+    # ========== 列操作 ==========
 
-    async def list_columns(self, table_name, view_name=None):
-        action = self._column_server_url()
-        params = {
-            "table_id": table_name if like_table_id(table_name) else None,
-            "table_name": table_name,
-            "view_name": view_name
-        }
-        res = await self.get(action=action, params=params)
-        return res.get("columns")
+    async def list_columns(self, table_name: str, view_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        params = self._table_params(table_name, view_name=view_name)
+        return await self.get(self.dtable_columns, params=params, res_path="columns")
 
-    async def get_column_link_id(self, table_name, column_name):
-        columns = await self.list_columns(table_name)
-        for column in columns:
-            if column.get("name") == column_name and column.get("type") == "link":
-                return column.get("data", {}).get("link_id")
-        raise ValueError(f"link type column {column_name} does not exist in current table")
-
-    async def get_column_by_name(self, table_name, column_name):
+    async def get_column_link_id(self, table_name: str, column_name: str) -> str:
         columns = await self.list_columns(table_name)
         for col in columns:
-            if col.get("name") == column_name:
-                return col
-        return None
+            if col.get("name") == column_name and col.get("type") == "link":
+                return col.get("data", {}).get("link_id")
+        raise ValueError(f"link column '{column_name}' not found")
 
-    async def get_columns_by_type(self, table_name, column_type: ColumnTypes):
-        if column_type not in ColumnTypes:
-            raise ValueError("type %s invalid!" % (column_type,))
+    async def get_column_by_name(self, table_name: str, column_name: str) -> Optional[Dict[str, Any]]:
         columns = await self.list_columns(table_name)
-        cols_results = [col for col in columns if col.get("type") == column_type.value]
-        return cols_results
+        return next((col for col in columns if col.get("name") == column_name), None)
 
-    async def insert_column(self, table_name, column_name, column_type, column_key=None, column_data=None):
+    async def get_columns_by_type(self, table_name: str, column_type: ColumnTypes) -> List[Dict[str, Any]]:
         if column_type not in ColumnTypes:
-            raise ValueError("type %s invalid!" % (column_type,))
-        return await self.post(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "column_name": column_name,
-                "column_type": column_type.value,
-                "column_data": column_data,
-                "anchor_column": column_key
-            })
+            raise ValueError(f"invalid column type: {column_type}")
+        columns = await self.list_columns(table_name)
+        return [col for col in columns if col.get("type") == column_type.value]
 
-    async def rename_column(self, table_name, column_key, new_column_name):
-        return await self.put(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "op_type": RENAME_COLUMN,
-                "table_name": table_name,
-                "column": column_key,
-                "new_column_name": new_column_name
-            })
+    async def insert_column(
+            self,
+            table_name: str,
+            column_name: str,
+            column_type: ColumnTypes,
+            column_key: Optional[str] = None,
+            column_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        if column_type not in ColumnTypes:
+            raise ValueError(f"invalid column type: {column_type}")
+        json_data = {
+            **self._table_params(table_name),
+            "column_name": column_name, "column_type": column_type.value
+        }
+        if column_key:
+            json_data["anchor_column"] = column_key
+        if column_data:
+            json_data["column_data"] = column_data
+        return await self.post(self.dtable_columns, json=json_data)
 
-    async def resize_column(self, table_name, column_key, new_column_width):
-        return await self.put(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "op_type": RESIZE_COLUMN,
-                "table_name": table_name,
-                "column": column_key,
-                "new_column_width": new_column_width
-            })
+    async def rename_column(self, table_name: str, column_key: str, new_column_name: str) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "op_type": RENAME_COLUMN, "column": column_key, "new_column_name": new_column_name}
+        return await self.put(self.dtable_columns, json=json_data)
 
-    async def freeze_column(self, table_name, column_key, frozen):
-        return await self.put(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "op_type": FREEZE_COLUMN,
-                "table_name": table_name,
-                "column": column_key,
-                "frozen": frozen
-            })
+    async def resize_column(self, table_name: str, column_key: str, new_column_width: int) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "op_type": RESIZE_COLUMN, "column": column_key, "new_column_width": new_column_width}
+        return await self.put(self.dtable_columns, json=json_data)
 
-    async def move_column(self, table_name, column_key, target_column_key):
-        return await self.put(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "op_type": MOVE_COLUMN,
-                "table_name": table_name,
-                "column": column_key,
-                "target_column": target_column_key
-            })
+    async def freeze_column(self, table_name: str, column_key: str, frozen: bool) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "op_type": FREEZE_COLUMN, "column": column_key, "frozen": frozen}
+        return await self.put(self.dtable_columns, json=json_data)
 
-    async def modify_column_type(self, table_name, column_key, new_column_type):
+    async def move_column(self, table_name: str, column_key: str, target_column_key: str) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "op_type": MOVE_COLUMN, "column": column_key, "target_column": target_column_key}
+        return await self.put(self.dtable_columns, json=json_data)
+
+    async def modify_column_type(self, table_name: str, column_key: str, new_column_type: ColumnTypes) -> Dict[str, Any]:
         if new_column_type not in ColumnTypes:
-            raise ValueError("type %s invalid!" % (new_column_type,))
+            raise ValueError(f"invalid column type: {new_column_type}")
         if new_column_type == ColumnTypes.LINK:
-            raise ValueError("Switching to link column type is not allowed!")
+            raise ValueError("cannot change to link column type")
+        json_data = {**self._table_params(table_name), "op_type": MODIFY_COLUMN_TYPE, "column": column_key, "new_column_type": new_column_type.value}
+        return await self.put(self.dtable_columns, json=json_data)
 
-        return await self.put(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "op_type": MODIFY_COLUMN_TYPE,
-                "table_name": table_name,
-                "column": column_key,
-                "new_column_type": new_column_type.value
-            })
+    async def add_column_options(self, table_name: str, column: str, options: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """添加单选/多选列选项"""
+        json_data = {**self._table_params(table_name), "column": column, "options": options}
+        return await self.post(f"{self.dtable}/column-options", json=json_data)
 
-    # 单选，多选列专用，添加选项
-    async def add_column_options(self, table_name, column, options):
-        return await self.post(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/column-options/",
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "column": column,
-                "options": options
-            })
+    async def add_column_cascade_settings(self, table_name: str, child_column: str, parent_column: str, cascade_settings: Dict[str, Any]) -> Dict[str, Any]:
+        """添加单选列级联设置"""
+        json_data = {**self._table_params(table_name), "child_column": child_column, "parent_column": parent_column, "cascade_settings": cascade_settings}
+        return await self.post(f"{self.dtable}/column-cascade-settings", json=json_data)
 
-    # 单选列专用，添加单选选项的父子及联关系，达到子列的单选选项条目根据父列的选项而定的效果
-    async def add_column_cascade_settings(self, table_name, child_column, parent_column, cascade_settings):
-        return await self.post(
-            action=f"dtable-server/api/v1/dtables/{self.dtable_uuid}/ccolumn-cascade-settings/",
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "child_column": child_column,
-                "parent_column": parent_column,
-                "cascade_settings": cascade_settings
-            })
+    async def delete_column(self, table_name: str, column_key: str) -> Dict[str, Any]:
+        json_data = {**self._table_params(table_name), "column": column_key}
+        return await self.delete(self.dtable_columns, json=json_data)
 
-    async def delete_column(self, table_name, column_key):
-        return await self.delete(
-            action=self._column_server_url(),
-            json={
-                "table_id": table_name if like_table_id(table_name) else None,
-                "table_name": table_name,
-                "column": column_key
-            })
+    # ========== 文件操作 ==========
 
-    # 从seatable下载文件到本地
-    # url示例:"http://192.168.150.145:30080/workspace/46/asset/b6721580-4f5b-4a92-b386-1078f4d77a36/files/2025-11/recall.txt"
-    # save_path示例:"/Users/xiongbo/workspace/seatable-api-plus/tests/recall.txt"
-    async def download_file(self, url, save_path):
-        if not str(UUID(self.dtable_uuid)) in url:
-            raise SeatableApiException("url invalid.")
-        path = url.split(str(UUID(self.dtable_uuid)))[-1].strip("/")
+    async def get_file_download_link(self, path: str) -> str:
+        return await self.get(f"{self.dtable_2_1}/app-download-link", params={"path": path}, token_type="TOKEN", res_path="download_link")
+
+    async def get_file_upload_link(self) -> Dict[str, Any]:
+        return await self.get(f"{self.dtable_2_1}/app-upload-link", token_type="TOKEN")
+
+    def _build_asset_url(self, relative_path: str, filename: str) -> str:
+        """构建资源 URL"""
+        return f"{self.server_url}/workspace/{self.workspace_id}/asset/{UUID(self.dtable_uuid)}/{parse.quote(relative_path.strip('/'))}/{parse.quote(filename)}"
+
+    async def _download_to_file(self, download_link: str, save_path: str) -> None:
+        """下载链接内容到本地文件"""
+        data = await self.get(download_link, response_type="bytes")
+        async with aiofiles.open(save_path, "wb") as f:
+            await f.write(data)
+
+    async def _upload_content(self, upload_info: Dict[str, Any], name: str, content: bytes, file_type: str, replace: bool) -> Dict[str, Any]:
+        """上传内容并返回文件信息"""
+        relative_path = upload_info["img_relative_path"] if file_type == "image" else upload_info["file_relative_path"]
+        upload_url = upload_info["upload_link"] + "?ret-json=1"
+        data = {"parent_dir": upload_info["parent_path"], "relative_path": relative_path, "replace": 1 if replace else 0}
+        res = await self.post(upload_url, data=data, file=(name, content), token_type="None")
+        d = res[0]
+        return {"type": file_type, "size": d.get("size"), "name": d.get("name"), "url": self._build_asset_url(relative_path, d.get("name", name))}
+
+    async def download_file(self, url: str, save_path: str) -> None:
+        """下载文件到本地"""
+        uuid_str = str(UUID(self.dtable_uuid))
+        if uuid_str not in url:
+            raise SeatableApiException("url invalid")
+        path = url.split(uuid_str)[-1].strip("/")
         download_link = await self.get_file_download_link(parse.unquote(path))
-        action = download_link.split(self.server_url, 1)[-1].strip("/")  # 分割一次并取最后部分
-        res = await self.get(action=action, response_type='bytes')
-        with open(save_path, "wb") as f:
-            f.write(res)
+        await self._download_to_file(download_link, save_path)
 
-    # 上传文件到云端seatable
-    async def upload_bytes_file(self, name, content: bytes, file_type='file', replace=False):
+    async def upload_bytes_file(self, name: str, content: bytes, file_type: Literal["file", "image"] = "file", replace: bool = False) -> Dict[str, Any]:
+        """上传字节内容"""
+        if file_type not in ("file", "image"):
+            raise SeatableApiException("file_type must be 'file' or 'image'")
+        upload_info = await self.get_file_upload_link()
+        return await self._upload_content(upload_info, name, content, file_type, replace)
 
-        if file_type not in ["image", "file"]:
-            raise SeatableApiException("relative or file_type invalid.")
-        upload_link_dict = await self.get_file_upload_link()
-        if file_type == "image":
-            relative_path = upload_link_dict['img_relative_path']
-        else:
-            relative_path = upload_link_dict['file_relative_path']
+    async def upload_local_file(self, file_path: str, name: Optional[str] = None, file_type: Literal["file", "image"] = "file", replace: bool = False) -> Dict[str, Any]:
+        """上传本地文件"""
+        if file_type not in ("file", "image"):
+            raise SeatableApiException("file_type must be 'file' or 'image'")
+        name = name or file_path.split("/")[-1]
+        async with aiofiles.open(file_path, "rb") as f:
+            content = await f.read()
+        upload_info = await self.get_file_upload_link()
+        return await self._upload_content(upload_info, name, content, file_type, replace)
 
-        parent_dir = upload_link_dict["parent_path"]
-        upload_link = upload_link_dict["upload_link"] + "?ret-json=1"
+    # ========== 自定义文件夹 ==========
 
-        action = upload_link.split(self.server_url, 1)[-1].strip("/")
-        file = (name, content)
-        data = {
-            "parent_dir": parent_dir,
-            "relative_path": relative_path,
-            "replace": 1 if replace else 0,
-        }
-
-        res = await self.post(action=action, data=data, file=file, token_type="None")
-        d = res[0]
-
-        url = "/".join([
-            self.server_url.strip("/"),
-            "workspace", str(self.workspace_id),
-            "asset",
-            str(UUID(self.dtable_uuid)),
-            parse.quote(relative_path.strip("/")),
-            parse.quote(d.get("name", name))
-        ])
-        return {
-            "type": file_type,
-            "size": d.get("size"),
-            "name": d.get("name"),
-            "url": url
-        }
-
-    # 上传本地文件到云端seatable
-    async def upload_local_file(self, file_path, name=None, file_type='file', replace=False):
-        if file_type not in ['image', "file"]:
-            raise SeatableApiException("file_type invalid.")
-        if not name:
-            name = file_path.strip("/").split("/")[-1]
-        if file_type not in ["image", "file"]:
-            raise SeatableApiException("relative or file_type invalid.")
-
-        upload_link_dict = await self.get_file_upload_link()
-        if file_type == "image":
-            relative_path = upload_link_dict["img_relative_path"]
-        else:
-            relative_path = upload_link_dict["file_relative_path"]
-
-        parent_dir = upload_link_dict['parent_path']
-        upload_link = upload_link_dict['upload_link'] + "?ret-json=1"
-
-        action = upload_link.split(self.server_url, 1)[-1].strip("/")
-        file = (name, open(file_path, "rb"))
-        data = {
-            "parent_dir": parent_dir,
-            "relative_path": relative_path,
-            "replace": 1 if replace else 0,
-        }
-
-        res = await self.post(action=action, data=data, file=file, token_type="None")
-        d = res[0]
-        url = (f"{self.server_url.strip('/')}/workspace/{self.workspace_id}/asset/"
-               f"{str(UUID(self.dtable_uuid))}/{parse.quote(relative_path.strip('/'))}/"
-               f"{parse.quote(d.get('name', name))}")
-        return {
-            "type": file_type,
-            "size": d.get("size"),
-            "name": d.get("name"),
-            "url": url
-        }
-
-    async def filter(self, table_name, conditions='', view_name=None):
-        queryset = QuerySet(self, table_name)
-        queryset.raw_rows = await self.list_rows(table_name, view_name)
-        queryset.raw_columns = await self.list_columns(table_name, view_name)
-        queryset.conditions = conditions
-        queryset._execute_conditions()
-        return queryset
-
-    async def query(self, sql, convert=True):
-        if not sql:
-            raise ValueError("sql can not be empty.")
-        action = f"dtable-db/api/v1/query/{self.dtable_uuid}/"
-        json_data = {'sql': sql}
-        data = await self.post(action=action, json=json_data)
-        if not data.get("success"):
-            raise SeatableApiException(data.get("error_message"))
-        metadata = data.get("metadata")
-        results = data.get("results")
-        if convert:
-            converted_results = convert_db_rows(metadata, results)
-            return converted_results
-        else:
-            return results
-
-    async def get_related_users(self):
-        res = await self.get(action=f"api/v2.1/dtables/{self.dtable_uuid}/related-users/")
-        return res['user_list']
-
-    async def big_data_insert_rows(self, table_name, rows_data):
-        return await self.post(
-            action=f"dtable-db/api/v1/insert-rows/{self.dtable_uuid}/",
-            json={
-                "table_name": table_name,
-                "rows": rows_data,
-            })
-
-    async def get_custom_file_download_link(self, path):
-        action = "api/v2.1/dtable/custom/app-download-link/"
-        params = {"path": path}
-        res = await self.get(action=action, params=params, token_type="TOKEN")
-        error_msg = res.get("error_msg")
-        if error_msg:
-            raise SeatableApiException(error_msg)
+    async def get_custom_file_download_link(self, path: str) -> str:
+        res = await self.get(f"{self.dtable_custom}/app-download-link", params={"path": path}, token_type="TOKEN")
+        if res.get("error_msg"):
+            raise SeatableApiException(res["error_msg"])
         return res.get("download_link")
 
-    # 得到自定义文件夹上传链接
-    async def get_custom_file_upload_link(self, path):
-        return await self.get(
-            action="api/v2.1/dtable/custom/app-upload-link/",
-            params={"path": path},
-            token_type="TOKEN"
-        )
+    async def get_custom_file_upload_link(self, path: str) -> Dict[str, Any]:
+        return await self.get(f"{self.dtable_custom}/app-upload-link", params={"path": path}, token_type="TOKEN")
 
-    # 下载自定义文件夹中的文件
-    async def download_custom_file(self, path, save_path):
+    async def download_custom_file(self, path: str, save_path: str) -> None:
+        """下载自定义文件夹中的文件"""
         download_link = await self.get_custom_file_download_link(parse.unquote(path))
-        action = download_link.split(self.server_url, 1)[-1].strip("/")
-        res = await self.get(action=action, response_type="bytes")
-        with open(save_path, "wb") as f:
-            f.write(res)
+        await self._download_to_file(download_link, save_path)
 
-    # 得到自定义文件信息
-    async def get_custom_file_info(self, path, name):
-        action = "api/v2.1/dtable/custom/app-asset-file/"
-        params = {"path": path, "name": name}
-        headers = parse_headers(self.token)
-        res = await self.get(action=action, headers=headers, params=params)
+    async def get_custom_file_info(self, path: str, name: str) -> Dict[str, Any]:
+        """获取自定义文件信息"""
+        res = await self.get(f"{self.dtable_custom}/app-asset-file", params={"path": path, "name": name}, token_type="TOKEN")
         d = res["dirent"]
         file_name = d.get("obj_name")
-        file_name_ext = file_name.split(".")[-1]
-        asset_uuid = d.get("uuid")
+        return {"type": "file", "size": d.get("file_size"), "name": file_name, "url": f"custom-asset://{d.get('uuid')}.{file_name.split('.')[-1]}"}
 
-        return {
-            "type": "file",
-            "size": d.get("file_size"),
-            "name": d.get("obj_name"),
-            "url": "custom-asset://%s.%s" % (asset_uuid, file_name_ext)
-        }
+    async def upload_local_file_to_custom_folder(self, local_path: str, custom_folder_path: Optional[str] = None, name: Optional[str] = None) -> Dict[str, Any]:
+        """上传文件到自定义文件夹"""
+        name = name or local_path.split("/")[-1]
+        custom_folder_path = custom_folder_path or "/"
+        upload_info = await self.get_custom_file_upload_link(parse.unquote(custom_folder_path))
+        upload_url = upload_info["upload_link"] + "?ret-json=1"
+        async with aiofiles.open(local_path, "rb") as f:
+            content = await f.read()
+        data = {"parent_dir": upload_info["parent_path"], "relative_path": upload_info["relative_path"], "replace": 0}
+        res = await self.post(upload_url, data=data, file=(name, content), token_type="None")
+        return await self.get_custom_file_info(path=custom_folder_path, name=res[0].get("name"))
 
-    # 上传本地文件到seatable云端的自定义文件夹中
-    async def upload_local_file_to_custom_folder(self, local_path, custom_folder_path=None, name=None, ):
-        if not name:
-            name = local_path.strip("/").split("/")[-1]
-        if not custom_folder_path:
-            custom_folder_path = "/"
+    async def list_custom_assets(self, path: str) -> Dict[str, Any]:
+        """列出自定义文件夹内容"""
+        return await self.get(f"{self.dtable_custom}/app-asset-dir", params={"path": path}, token_type="TOKEN")
 
-        upload_link_dict = await self.get_custom_file_upload_link(parse.unquote(custom_folder_path))
-        upload_link = upload_link_dict.get("upload_link") + "?ret-json=1"
-        parent_path = upload_link_dict.get("parent_path")
-        relative_path = upload_link_dict.get("relative_path")
+    # ========== 其他 ==========
 
-        action = upload_link.split(self.server_url, 1)[-1].strip("/")
-        file = (name, open(local_path, "rb"))
-        data = {
-            "parent_dir": parent_path,
-            "relative_path": relative_path,
-            "replace": 0,
-        }
-        res = await self.post(action=action, data=data, file=file, token_type="None")
-        d = res[0]
-        file_name = d.get("name")
-        return await self.get_custom_file_info(path=custom_folder_path, name=file_name)
+    async def query(self, sql: str, convert: bool = True) -> List[Dict[str, Any]]:
+        """执行 SQL 查询"""
+        if not sql:
+            raise ValueError("sql cannot be empty")
+        data = await self.post(f"{self.dtable_db}/query/{self.dtable_uuid}", json={"sql": sql})
+        if not data.get("success"):
+            raise SeatableApiException(data.get("error_message"))
+        results = data.get("results")
+        return convert_db_rows(data.get("metadata"), results) if convert else results
 
-    # 列出自定义目录文件夹中的文件
-    async def list_custom_assets(self, path):
-        return await self.get(
-            action=f"api/v2.1/dtable/custom/app-asset-dir/",
-            params={"path": path},
-            token_type="TOKEN")
+    async def get_related_users(self) -> List[Dict[str, Any]]:
+        return await self.get(f"{self.server_url}/api/v2.1/dtables/{self.dtable_uuid}/related-users", res_path="user_list")
 
-    async def get_user_info(self, username):
-        return await self.get(
-            action="api/v2.1/dtable/app-user-info/",
-            params={"username": username},
-            token_type="TOKEN"
-        )
+    async def big_data_insert_rows(self, table_name: str, rows_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """大数据插入行"""
+        url = f"{self.dtable}/add-archived-rows" if self.use_api_gateway else f"{self.dtable_db}/insert-rows/{self.dtable_uuid}"
+        return await self.post(url, json={"table_name": table_name, "rows": rows_data})
+
+    async def get_user_info(self, username: str) -> Dict[str, Any]:
+        return await self.get(f"{self.dtable_2_1}/app-user-info", params={"username": username}, token_type="TOKEN")

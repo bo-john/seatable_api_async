@@ -29,20 +29,20 @@ class ColumnValue(object):
         return self.column_value != value
 
     def greater_equal_than(self, value):
-        raise ValueError("%s type column does not support the query method '%s'" % (self.column_type, '>='))
+        raise ValueError(f"{self.column_type} type column does not support the query method '>='")
 
     def greater_than(self, value):
-        raise ValueError("%s type column does not support the query method '%s'" % (self.column_type, '>'))
+        raise ValueError(f"{self.column_type} type column does not support the query method '>'")
 
     def less_equal_than(self, value):
-        raise ValueError("%s type column does not support the query method '%s'" % (self.column_type, '<='))
+        raise ValueError(f"{self.column_type} type column does not support the query method '<='")
 
     def less_than(self, value):
-        raise ValueError("%s type column does not support the query method '%s'" % (self.column_type, '<'))
+        raise ValueError(f"{self.column_type} type column does not support the query method '<'")
 
     def like(self, value):
         '''fuzzy search'''
-        raise ValueError("%s type column does not support the query method '%s'" % (self.column_type, 'like'))
+        raise ValueError(f"{self.column_type} type column does not support the query method 'like'")
 
 
 class StringColumnValue(ColumnValue):
@@ -199,7 +199,7 @@ class NumberColumn(BaseColumn):
         else:
             try:
                 value = int(value)
-            except:
+            except (ValueError, TypeError):
                 self.raise_input_error(value)
         return value
 
@@ -207,9 +207,9 @@ class NumberColumn(BaseColumn):
         return NumberDateColumnValue(value, self.column_type)
 
     def raise_input_error(self, value):
-        raise ValueError("""%s type column does not support the query string as "%s",
+        raise ValueError(f"""{self.column_type} type column does not support the query string as "{value}",
                 please use "" or digital numbers
-                """ % (self.column_type, value))
+                """)
 
 
 class DateColumn(BaseColumn):
@@ -239,23 +239,22 @@ class DateColumn(BaseColumn):
                     h, m = hms_str_list
                 elif len(hms_str_list) == 3:
                     h, m, s = hms_str_list
-                datetime_obj = datetime.strptime("%s %s" % (
-                    ymd, "%s:%s:%s" % (h, m, s)), '%Y-%m-%d %H:%M:%S')
+                datetime_obj = datetime.strptime(f"{ymd} {h}:{m}:{s}", '%Y-%m-%d %H:%M:%S')
             return datetime_obj
-        except:
+        except (ValueError, TypeError, AttributeError):
             return self.raise_error(time_str)
 
     def parse_table_value(self, time_str):
         return NumberDateColumnValue(self.parse_input_value(time_str), self.column_type)
 
     def raise_error(self, value):
-        raise ValueError(""" %s type column does not support the query string as "%s",
+        raise ValueError(f"""{self.column_type} type column does not support the query string as "{value}",
                 the supported query string pattern like:
                 "YYYY-MM-DD" or
                 "YYYY-MM-DD hh" or
                 "YYYY-MM-DD hh:mm" or
                 "YYYY-MM-DD hh:mm:ss" or
-                """ % (self.column_type, value))
+                """)
 
 
 class CTimeColumn(DateColumn):
@@ -313,14 +312,13 @@ class CheckBoxColumn(BaseColumn):
         return BoolColumnValue(value, self.column_type)
 
     def raise_error(self, value):
-        raise ValueError(""" %s type column does not support the query string as "%s",
+        raise ValueError(f"""{self.column_type} type column does not support the query string as "{value}",
                         the supported query string pattern like:
                         "true" or "false", case insensitive
-                        """ % (self.column_type, value))
+                        """)
 
 
 class MultiSelectColumn(BaseColumn):
-
     def __init__(self):
         super(MultiSelectColumn, self).__init__()
         self.column_type = ColumnTypes.MULTIPLE_SELECT.value
