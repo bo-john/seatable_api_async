@@ -3,8 +3,8 @@ requires = ["uv_build >= 0.9.10, <0.10.0"]
 build-backend = "uv_build"
 
 [project]
-name = "seatable_api_async"
-version = "0.2.0"
+name = "seatable-api-async"
+version = "0.2.1"
 description = "异步版本的 SeaTable API Python 客户端，基于 aiohttp 实现"
 authors = [
     { name = "bo-john", email = "boxiong74@gmail.com" },

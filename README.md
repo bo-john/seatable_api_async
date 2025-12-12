@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/seatable-api-async.svg)](https://pypi.org/project/seatable-api-async/)
 [![License](https://img.shields.io/github/license/bo-john/seatable_api_async.svg)](https://github.com/bo-john/seatable_api_async/blob/main/LICENSE)
 
-异步版本的 SeaTable API Python 客户端库，基于 [seatable-api](https://github.com/seatable/seatable-api-python) 改造，使用 `aiohttp` 和 `async/await` 实现完全异步操作。
+异步版本的 SeaTable API Python 客户端库，基于 [seatable-api-python](https://github.com/seatable/seatable-api-python) 改造，使用 `aiohttp` 和 `async/await` 实现完全异步操作。
 
 ## 特性
 
@@ -18,10 +18,10 @@
 
 ```bash
 # 使用 pip
-pip install seatable_api_async
+pip install seatable-api-async
 
 # 使用 uv
-uv add seatable_api_async
+uv add seatable-api-async
 ```
 
 ## 快速开始
