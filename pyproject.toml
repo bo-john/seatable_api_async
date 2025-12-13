@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "seatable-api-async"
-version = "0.2.1"
+version = "0.2.2"
 description = "异步版本的 SeaTable API Python 客户端，基于 aiohttp 实现"
 authors = [
     { name = "bo-john", email = "boxiong74@gmail.com" },
@@ -23,8 +23,10 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/bo-john/seatable_api_async.git"
-Issues = "https://github.com/bo-john/seatable_api_async/issues"
+Homepage = "https://github.com/bo-john/seatable-api-async"
+Repository = "https://github.com/bo-john/seatable-api-async"
+Issues = "https://github.com/bo-john/seatable-api-async/issues"
+Documentation = "https://github.com/bo-john/seatable-api-async#readme"
 
 [dependency-groups]
 dev = [
